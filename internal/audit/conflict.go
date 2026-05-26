@@ -1,79 +1,73 @@
-// Package audit provides conflict detection and misconfiguration analysis
-// for parsed cron expressions.
 package audit
 
 import (
 	"fmt"
+	"time"
 
-	"github.com/user/croncheck/internal/parser"
+	"github.com/user/croncheck/internal/scheduler"
 )
-
-// ConflictType describes the kind of conflict detected.
-type ConflictType string
 
 const (
-	ConflictOverlap    ConflictType = "overlap"
-	ConflictDuplicate  ConflictType = "duplicate"
-	ConflictSubsumed   ConflictType = "subsumed"
+	// overlapLookAhead is the number of future occurrences used for conflict detection.
+	overlapLookAhead = 1440 // ~24 hours at per-minute granularity
 )
 
-// Conflict represents a detected scheduling conflict between two cron entries.
-type Conflict struct {
-	Type    ConflictType
-	A       parser.CronEntry
-	B       parser.CronEntry
-	Message string
-}
+// DetectConflicts finds pairs of cron entries whose schedules overlap.
+// It returns an Issue for each conflicting pair.
+func DetectConflicts(entries []Entry) []Issue {
+	var issues []Issue
+	base := time.Now().Truncate(time.Minute)
 
-func (c Conflict) Error() string {
-	return fmt.Sprintf("%s conflict between %q and %q: %s", c.Type, c.A.Raw, c.B.Raw, c.Message)
-}
-
-// DetectConflicts compares all pairs of cron entries and returns any conflicts found.
-func DetectConflicts(entries []parser.CronEntry) []Conflict {
-	var conflicts []Conflict
 	for i := 0; i < len(entries); i++ {
 		for j := i + 1; j < len(entries); j++ {
-			if c, ok := checkPair(entries[i], entries[j]); ok {
-				conflicts = append(conflicts, c)
+			if issue := checkPair(entries[i], entries[j], base); issue != nil {
+				issues = append(issues, *issue)
 			}
 		}
 	}
-	return conflicts
+	return issues
 }
 
-func checkPair(a, b parser.CronEntry) (Conflict, bool) {
-	if a.Raw == b.Raw {
-		return Conflict{
-			Type:    ConflictDuplicate,
-			A:       a,
-			B:       b,
-			Message: "identical cron expressions",
-		}, true
+func checkPair(a, b Entry, base time.Time) *Issue {
+	// Fast path: identical expressions are always conflicting.
+	if a.Expression == b.Expression {
+		return &Issue{
+			Severity: SeverityWarning,
+			Type:     IssueConflict,
+			Message: fmt.Sprintf(
+				"duplicate expression %q: %q and %q fire at identical times",
+				a.Expression, a.Label, b.Label,
+			),
+			Entries: []string{a.Label, b.Label},
+		}
 	}
-	if fieldsOverlap(a, b) {
-		return Conflict{
-			Type:    ConflictOverlap,
-			A:       a,
-			B:       b,
-			Message: "schedules may fire at the same time",
-		}, true
+
+	// Use window-based overlap detection for richer diagnostics.
+	windows, err := scheduler.FindOverlapWindows(a.Expression, b.Expression, base, overlapLookAhead)
+	if err != nil || len(windows) == 0 {
+		return nil
 	}
-	return Conflict{}, false
+
+	totalOverlaps := 0
+	for _, w := range windows {
+		totalOverlaps += w.Count
+	}
+
+	return &Issue{
+		Severity: SeverityWarning,
+		Type:     IssueConflict,
+		Message: fmt.Sprintf(
+			"%q and %q overlap %d time(s) in the next 24h (first window: %s)",
+			a.Label, b.Label, totalOverlaps, windows[0].String(),
+		),
+		Entries: []string{a.Label, b.Label},
+	}
 }
 
-// fieldsOverlap returns true when both entries use wildcard (*) in every field,
-// meaning they will always fire together.
-func fieldsOverlap(a, b parser.CronEntry) bool {
-	aFields := [5]string{a.Minute, a.Hour, a.DayOfMonth, a.Month, a.DayOfWeek}
-	bFields := [5]string{b.Minute, b.Hour, b.DayOfMonth, b.Month, b.DayOfWeek}
-	for i := range aFields {
-		if aFields[i] == "*" && bFields[i] == "*" {
-			continue
-		}
-		if aFields[i] != bFields[i] {
-			return false
-		}
+// fieldsOverlap is retained for unit-testable field-level checks.
+func fieldsOverlap(a, b string) bool {
+	if a == "*" || b == "*" {
+		return true
 	}
-	return true
+	return a == b
 }
