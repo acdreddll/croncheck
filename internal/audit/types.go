@@ -28,3 +28,18 @@ type Result struct {
 func (r Result) HasIssues() bool {
 	return len(r.Conflicts) > 0 || len(r.Misconfigurations) > 0
 }
+
+// Summary returns a brief string describing the number of issues found.
+func (r Result) Summary() string {
+	if !r.HasIssues() {
+		return "no issues found"
+	}
+	var parts []string
+	if n := len(r.Conflicts); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d conflict(s)", n))
+	}
+	if n := len(r.Misconfigurations); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d misconfiguration(s)", n))
+	}
+	return strings.Join(parts, ", ")
+}
